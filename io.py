@@ -1,7 +1,3 @@
-import os.path
-import numpy as np
-
-
 """STRFlab-type format spec
 
 Each stimulus is labeled with a string suffix, such as '0001'.
@@ -25,8 +21,101 @@ Each stimulus has 3 corresponding files:
           trials.
 """
 
+import os, re
+import numpy as np
+import kkpandas # could consider making this optional
+
+class STRFlabFileSchema:
+    """Object encapsulating format spec for STRFlab-type files"""
+    stim_file_prefix = 'stim'
+    interval_file_prefix = 'interval'
+    spike_file_prefix = 'spike'
+    stim_file_regex = r'stim(\d+)\.wav'
+    spike_file_regex = r'^spike(\d+)$'
+    interval_file_regex = r'^interval(\d+)$'
+    
+    def __init__(self, directory):
+        self.directory = os.path.abspath(directory)
+        self.populate()
+    
+    def populate(self):
+        all_files = os.listdir(self.directory)
+        
+        # Find files matching regexes
+        self.spike_file_labels = apply_and_filter_by_regex(
+            self.spike_file_regex, all_files, sort=True)
+        self.interval_file_labels = apply_and_filter_by_regex(
+            self.interval_file_regex, all_files, sort=True)
+        
+        # Reconstruct the filenames that match
+        self.spike_filenames = [self.spike_file_prefix + label 
+            for label in self.spike_file_labels]
+        self.interval_filenames = [self.interval_file_prefix + label 
+            for label in self.interval_file_labels]            
+
+        self._force_reload = False
+
+def apply_and_filter_by_regex(pattern, list_of_strings, sort=True):
+    """Apply regex pattern to each string, return first hit from each match"""
+    res = []
+    for s in list_of_strings:
+        m = re.match(pattern, s)
+        if m is None:
+            continue
+        else:
+            res.append(m.groups()[0])
+    if sort:
+        return sorted(res)
+    else:
+        return res
+
+def parse_space_sep(s, dtype=np.int):
+    """Returns a list of integers from a space-separated string"""
+    s2 = s.strip()
+    if s2 == '':
+        return []    
+    else:
+        return [dtype(ss) for ss in s2.split()]
+
+def read_directory(directory):
+    """Return dict {suffix : folded} for all stimuli in the directory"""
+    sls = STRFlabFileSchema(directory)
+    assert np.all(
+        np.asarray(sls.spike_file_labels) == 
+        np.asarray(sls.interval_file_labels))
+    
+    dfolded = {}
+    for suffix in sls.spike_file_labels:
+        dfolded[suffix] = read_single_stimulus(directory, suffix)
+    
+    return dfolded
+    
+
+def read_single_stimulus(directory, suffix):
+    """Read STRFlab-type text files for a single stimulus"""
+    # Load the spikes
+    spikes_filename = os.path.join(directory, 'spike' + suffix)
+    with file(spikes_filename) as fi:
+        lines = fi.readlines()
+    spike_times = [parse_space_sep(s, dtype=np.float)   
+        for s in lines]
+
+    # Load the intervals
+    intervals_filenames = os.path.join(directory, 'interval' + suffix)
+    with file(intervals_filenames) as fi:
+        lines = fi.readlines()
+    intervals = np.asarray([parse_space_sep(s, dtype=np.float) 
+        for s in lines])
+    starts, stops = intervals.T
+
+    # Create the folded
+    folded = kkpandas.Folded(spike_times, starts=starts, stops=stops)
+    return folded
+
+
 def write_single_stimulus(suffix, spikes, starts=None, stops=None,
-    output_directory='.', time_formatter=None, write_intervals=True):
+    output_directory='.', time_formatter=None, write_intervals=True,
+    flush_directory=True):
     """Write out STRFlab-type text files for a single stimulus.
     
     suffix : string labelling this stimulus
@@ -54,6 +143,8 @@ def write_single_stimulus(suffix, spikes, starts=None, stops=None,
         decimal point.
     
     write_intervals : if False, just write the spike files
+
+    flush_directory : erase everything in the directory before writing
     
     The following error checking is done:
     1)  The lengths of `spikes`, `starts`, and `stops` should be the same
@@ -90,17 +181,25 @@ def write_single_stimulus(suffix, spikes, starts=None, stops=None,
                 "Some spikes fall before trial start"
             assert np.all(np.asarray(trial_spikes) < trial_stop), \
                 "Some spikes fall after trial stop"
+
+    # Set up output directory
+    if not os.path.exists(output_directory):
+        os.mkdir(output_directory)
     
     # Write the spikes for each repetition
+    to_write = []
+    for trial_spikes in spikes:
+        to_write.append(' '.join(map(time_formatter, trial_spikes)))
     with file(spike_filename, 'w') as fi:
-        for trial_spikes in spikes:
-            fi.write(' '.join(map(time_formatter, trial_spikes)))
-            fi.write('\n')
+        fi.write("\n".join(to_write))
+
     
     # Write the start and stop time of each repetition
     if write_intervals:
+        to_write = []
+        for trial_start, trial_stop in zip(starts, stops):
+            to_write.append(time_formatter(trial_start) + ' ' + 
+                time_formatter(trial_stop))
+        
         with file(interval_filename, 'w') as fi:
-            for trial_start, trial_stop in zip(starts, stops):
-                fi.write(
-                    time_formatter(trial_start) + ' ' + 
-                    time_formatter(trial_stop) + '\n')
+            fi.write("\n".join(to_write))
