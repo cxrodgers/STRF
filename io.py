@@ -36,6 +36,7 @@ class STRFlabFileSchema:
     
     def __init__(self, directory):
         self.directory = os.path.abspath(directory)
+        self.name = os.path.split(self.directory)[1]
         self.populate()
     
     def populate(self):
@@ -77,7 +78,7 @@ def parse_space_sep(s, dtype=np.int):
     else:
         return [dtype(ss) for ss in s2.split()]
 
-def read_directory(directory):
+def read_directory(directory, **folding_kwargs):
     """Return dict {suffix : folded} for all stimuli in the directory"""
     sls = STRFlabFileSchema(directory)
     assert np.all(
@@ -86,13 +87,18 @@ def read_directory(directory):
     
     dfolded = {}
     for suffix in sls.spike_file_labels:
-        dfolded[suffix] = read_single_stimulus(directory, suffix)
+        dfolded[suffix] = read_single_stimulus(directory, suffix, **folding_kwargs)
     
     return dfolded
     
 
-def read_single_stimulus(directory, suffix):
-    """Read STRFlab-type text files for a single stimulus"""
+def read_single_stimulus(directory, suffix, **folding_kwargs):
+    """Read STRFlab-type text files for a single stimulus
+    
+    TODO:
+    split this into smaller functions, to read just spikes or just intervals
+    eventually these should become properties in some Reader object
+    """
     # Load the spikes
     spikes_filename = os.path.join(directory, 'spike' + suffix)
     with file(spikes_filename) as fi:
@@ -109,7 +115,8 @@ def read_single_stimulus(directory, suffix):
     starts, stops = intervals.T
 
     # Create the folded
-    folded = kkpandas.Folded(spike_times, starts=starts, stops=stops)
+    folded = kkpandas.Folded(spike_times, starts=starts, stops=stops,
+        **folding_kwargs)
     return folded
 
 
