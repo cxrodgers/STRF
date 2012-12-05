@@ -24,6 +24,35 @@ Each stimulus has 3 corresponding files:
 import os, re
 import numpy as np
 import kkpandas # could consider making this optional
+import scipy.io
+
+def read_timefreq_from_matfile(filename):
+    """Returns (Pxx, freqs, t) for a given matfile
+    
+    If Pxx cannot be loaded, raises error.
+    If freqs or t cannot be loaded, returns None for those.
+    """
+    try:
+        res = scipy.io.loadmat(filename)
+    except IOError:
+        raise IOError("Cannot load matfile %s" % filename)
+    
+    try:
+        Pxx = res['Pxx']
+    except KeyError:
+        raise IOError("Pxx not in matfile %s" % filename)
+    
+    try:
+        t = res['t'].flatten()
+    except KeyError:
+        t = None
+    
+    try:
+        freqs = res['freqs'].flatten()
+    except KeyError:
+        freqs = None
+    
+    return Pxx, freqs, t
 
 def load_waveform_from_matfile(filename, fs=None):
     """Load 'waveform' from matlab file. If possible, loads sampling rate.
@@ -31,7 +60,6 @@ def load_waveform_from_matfile(filename, fs=None):
     If fs is None, look for a variable called 'fs' in the matfile.
     If 'fs' is not in the matfile, returns whatever you pass as fs.
     """
-    import scipy.io
     res = scipy.io.loadmat(filename)
     waveform = res['waveform'].flatten()
     
@@ -45,13 +73,18 @@ class STRFlabFileSchema:
     stim_file_prefix = 'stim'
     interval_file_prefix = 'interval'
     spike_file_prefix = 'spike'
+    timefreq_file_prefix = 'timefreq'
+    
     stim_file_regex = r'stim(\d+)\.wav'
     spike_file_regex = r'^spike(\d+)$'
     interval_file_regex = r'^interval(\d+)$'
+    timefreq_file_regex = r'^timefreq(\d+)\.mat$'
     
     def __init__(self, directory):
         self.directory = os.path.abspath(directory)
         self.name = os.path.split(self.directory)[1]
+        self.timefreq_path = None
+        
         self.populate()
     
     def populate(self):
@@ -63,6 +96,21 @@ class STRFlabFileSchema:
         self.interval_file_labels = apply_and_filter_by_regex(
             self.interval_file_regex, all_files, sort=True)
         
+        # Handle timefreq slightly differently
+        # Make this the generic loading syntax for all files
+        try:
+            timefreq_files = os.listdir(self.timefreq_path)
+            do_load = True
+        except (IOError, TypeError):
+            do_load = False
+        if do_load:
+            self.timefreq_file_labels = apply_and_filter_by_regex(
+                self.timefreq_file_regex, timefreq_files, sort=True)
+            self.timefreq_filenames = [os.path.join(self.timefreq_path, 
+                self.timefreq_file_prefix + label)
+                for label in self.timefreq_file_labels]
+            
+        
         # Reconstruct the filenames that match
         self.spike_filenames = [self.spike_file_prefix + label 
             for label in self.spike_file_labels]
@@ -70,6 +118,11 @@ class STRFlabFileSchema:
             for label in self.interval_file_labels]            
 
         self._force_reload = False
+    
+    @property
+    def timefreq_filename(self):
+        return dict([(label, filename) for label, filename in
+            zip(self.timefreq_file_labels, self.timefreq_filenames)])
 
 def apply_and_filter_by_regex(pattern, list_of_strings, sort=True):
     """Apply regex pattern to each string, return first hit from each match"""

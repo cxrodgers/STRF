@@ -12,3 +12,10 @@ class Experiment:
         self.path = path
         if file_schema is None:
             self.file_schema = STRFlabFileSchema(self.path)
+        
+        # How to read timefreq files
+        self.timefreq_file_reader = io.read_timefreq_from_matfile
+
+    def read_timefreq(self, label):
+        filename = self.file_schema.timefreq_filename[label]        
+        return self.timefreq_file_reader(filename)
