@@ -1,6 +1,7 @@
 import numpy as np
 import io
 from io import STRFlabFileSchema
+import kkpandas
 
 def allclose_2d(a):
     """Returns True if entries in `a` are close to equal.
@@ -74,6 +75,25 @@ class Experiment:
     def __init__(self, path=None, file_schema=None):
         """Create a new object to estimate a STRF from a dataset.
         
+        There are many computation steps which must be done in order.
+        Here is a full pipeline illustrating its use:
+        # Get the files
+        expt_path = expt_path_l[0]
+        expt = STRF.base.Experiment(expt_path)
+        expt.file_schema.timefreq_path = timefreq_dir
+        expt.file_schema.populate()
+
+        # Load the timefreq and concatenate
+        expt.read_all_timefreq()
+        expt.compute_full_stimulus_matrix()
+
+        # Load responses and bin
+        expt.read_all_responses()
+        expt.compute_binned_responses()
+
+        # Grab the stimulus and responses
+        fsm = expt.compute_full_stimulus_matrix()
+        frm = expt.compute_full_response_matrix()        
         """
         # Location of data
         self.path = path
@@ -128,8 +148,9 @@ class Experiment:
     
     def read_all_responses(self):
         """Reads all response files and stores in self.response_l"""
-        # Read in all spikes
-        dfolded = io.read_directory(self.file_schema.spike_path)
+        # Read in all spikes, recentering
+        dfolded = io.read_directory(self.file_schema.spike_path,
+            subtract_off_center=True)
         
         # Order by label
         response_l = []
@@ -139,17 +160,52 @@ class Experiment:
         self.response_l = response_l
         return response_l
     
-    def compute_binned_responses(self):
-        """Bins the stored responses in the same way as the stimuli"""
-        assert len(self.t_l) == len(self.response_l)
+    def compute_binned_responses(self, dilation_before_binning=.99663):
+        """Bins the stored responses in the same way as the stimuli.
+        
+        The bins are inferred from the binwidth of the timefreq, as stored
+        in self.t_l, independently for each stimulus.
+        
+        Optionally, a dilation is applied to these bins to convert them into
+        the neural timebase.
+        
+        Finally, the values in self.response_l are binned and stored in 
+        self.binned_response_l
+        
+        I also store self.trials_l to identify how many repetitions of each
+        timepoint occurred.
+        """
+        self.binned_response_l = []
+        self.trials_l = []
         
         # Iterate over stimuli
         for folded, t_stim in zip(self.response_l, self.t_l):
-            # Bin each, using the same number of bins as in t
-            binned = kkpandas.Binned.from_folded(folded, bins=len(t_stim))
+            # Get bins from t_stim by recovering original edges
+            t_stim_width = np.mean(np.diff(t_stim))
+            edges = np.linspace(0, len(t_stim) * t_stim_width, len(t_stim) + 1)
             
-            # Check that the starts and stops line up
-            1/0
+            # Optionally apply a kkpandas dilation
+            # Spike times are always shorter than behavior times
+            edges = edges * dilation_before_binning
+            
+            # Bin each, using the same number of bins as in t
+            binned = kkpandas.Binned.from_folded(folded, bins=edges)
+            
+            # Save the results
+            self.binned_response_l.append(binned.rate.values.flatten())
+            self.trials_l.append(binned.trials.values.flatten())
+
+    def compute_concatenated_stimuli(self):
+        """Returns concatenated spectrograms as (N_freqs, N_timepoints).
+        
+        This is really only for visualization, not computation, because
+        it doesn't include the delays.
+        """
+        return np.concatenate(self.timefreq_list, axis=1)
+    
+    def compute_concatenated_responses(self):
+        """Returns a 1d array of concatenated binned responses"""
+        return np.concatenate(self.binned_response_l)
 
     def compute_full_stimulus_matrix(self, n_delays=3, timefreq_list=None,
         blanking_value=-np.inf):
@@ -170,3 +226,122 @@ class Experiment:
         # Write out
 
         return self.full_stimulus_matrix
+    
+    def compute_full_response_matrix(self):
+        """Returns a response matrix, suitable for fitting."""
+        return self.compute_concatenated_responses()
+    
+
+
+def clean_up_stimulus(whole_stimulus, silence_value='min_row', z_score=True):
+    """Replaces non-finite values with silence_value, and z-scores by row.
+    
+    silence_value == 'min_row' : minimum value in the row
+    silence_value == 'min_whole' : minimum value in the whole stimulus
+    silence_value == 'mean_row', 'mean_whole' : mean
+    silence_value == 'median_row', 'median_whole' : median
+    
+    You might want to check a histogram of the returned values and pick what
+    looks best. On the one hand, silence is best represented by minimal
+    power. On the other hand, this distorts the histogram due to silence
+    in the actual signals, and/or the blanking periods. It also means that
+    this silence will play a part in the linear fit.
+    
+    Most models treat the rows independently, so if you set the silence
+    row-independently, it will mesh nicely. On the other hand, why should
+    silence in one frequency band be treated differently from others?
+    """
+    #~ if np.any(np.isnan(whole_stimulus)):
+        #~ print "warning: what to do with NaNs?"
+    
+    
+    if silence_value is 'min_row':
+        cleaned_stimulus_a = whole_stimulus.copy()
+        for n in range(len(cleaned_stimulus_a)):
+            msk = np.isneginf(cleaned_stimulus_a[n])
+            cleaned_stimulus_a[n, msk] = cleaned_stimulus_a[n, ~msk].min()
+    
+    elif silence_value is 'mean_row':
+        cleaned_stimulus = []
+        for row in whole_stimulus:
+            row[np.isneginf(row)] = row[~np.isneginf(row)].mean()
+            cleaned_stimulus.append(row)
+        cleaned_stimulus_a = np.array(cleaned_stimulus)
+    
+    elif silence_value is 'median_row':
+        cleaned_stimulus = []
+        for row in whole_stimulus:
+            row[np.isneginf(row)] = np.median(row[~np.isneginf(row)])
+            cleaned_stimulus.append(row)
+        cleaned_stimulus_a = np.array(cleaned_stimulus)
+    
+    elif silence_value is 'min_whole':
+        cleaned_stimulus_a = whole_stimulus.copy()
+        cleaned_stimulus_a[np.isneginf(cleaned_stimulus_a)] = \
+            np.min(cleaned_stimulus_a[np.isfinite(cleaned_stimulus_a)])
+        
+    elif silence_value is 'mean_whole':
+        cleaned_stimulus_a = whole_stimulus.copy()
+        cleaned_stimulus_a[np.isneginf(cleaned_stimulus_a)] = \
+            np.mean(cleaned_stimulus_a[np.isfinite(cleaned_stimulus_a)])
+
+    elif silence_value is 'median_whole':
+        cleaned_stimulus_a = whole_stimulus.copy()
+        cleaned_stimulus_a[np.isneginf(cleaned_stimulus_a)] = \
+            np.median(cleaned_stimulus_a[np.isfinite(cleaned_stimulus_a)])
+    
+    else:
+        # blindly assign 'silence_value' to the munged values
+        cleaned_stimulus_a = whole_stimulus.copy()
+        cleaned_stimulus_a[np.isneginf(cleaned_stimulus_a)] = silence_value
+    
+    if z_score:
+        for n in range(cleaned_stimulus_a.shape[0]):
+            s = np.std(cleaned_stimulus_a[n, :])
+            if s < 10**-6: print "warning, std too small"
+            cleaned_stimulus_a[n, :] = (
+                cleaned_stimulus_a[n, :] - cleaned_stimulus_a[n, :].mean()) / \
+                np.std(cleaned_stimulus_a[n, :])
+    
+    return cleaned_stimulus_a
+
+
+class DirectFitter:
+    """Calculates STRF for response matrix and stimulus matrix"""
+    def __init__(self, X=None, Y=None):
+        """New fitter
+        X : (n_timepoints, n_features).
+            I think this works better if mean of rows and cols is zero.
+        Y : (n_timepoints, 1)
+            Generally 0s and 1s.
+        """
+        self.X = X
+        self.Y = Y
+        self.XTX = None # pre-calculate this one
+        
+        if self.X.shape[0] != self.Y.shape[0]:
+            raise ValueError("n_timepoints (dim0) is not the same!")
+        if self.X.shape[1] > self.X.shape[1]:
+            print "warning: more features than timepoints, possibly transposed"
+    
+    def STA(self):
+        """Returns spike-triggered average of stimulus X and response Y.
+        
+        Therefore the STA is given by np.dot(X.transpose(), Y) / Y.sum().
+        """
+        return np.dot(self.X.transpose(), self.Y).astype(np.float) / \
+            self.Y.sum()
+        #X = X - X.mean(axis=0)[newaxis, :] # each feature has zero-mean over time
+        #X = X - X.mean(axis=1)[:, newaxis] # each datapoint has zero-mean over features
+
+    def whitened_STA(self, ridge_parameter=0.):
+        if self.XTX is None:
+            self.XTX = np.dot(self.X.transpose(), self.X)
+        
+        ridge_mat = ridge_parameter * len(self.XTX)**2 * np.eye(len(self.XTX))
+        STA = self.STA()
+    
+        return np.dot(np.linalg.inv(self.XTX + ridge_mat), STA)*self.X.shape[0]
+
+
+    
