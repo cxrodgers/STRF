@@ -106,28 +106,50 @@ class Experiment:
         
         # Optionally store
         if store_intermediates:
-            self.timefreq_l = Pxx_l
+            self.timefreq_list = Pxx_l
             self.freqs_l = freqs_l
             self.t_l = t_l
     
         # Test for freqs consistency
         self.freqs = None
         if allclose_2d(freqs_l):
-            self.freqs = np.mean(freqs_l)
+            self.freqs = np.mean(freqs_l, axis=0)
 
         # Test for t consistency
         self.t = None
         if allclose_2d(t_l):
-            self.t = np.mean(self.t)
+            self.t = np.mean(t_l, axis=0)
         
         return Pxx_l, freqs_l, t_l
     
     def read_response(self, label):
-        io.read_single_stimulus(self.file_schema.spike_path, label)
-        return self.spike_file_reader(filename)
+        folded = io.read_single_stimulus(self.file_schema.spike_path, label)
+        return folded
     
     def read_all_responses(self):
+        """Reads all response files and stores in self.response_l"""
+        # Read in all spikes
+        dfolded = io.read_directory(self.file_schema.spike_path)
         
+        # Order by label
+        response_l = []
+        for label in self.file_schema.spike_file_labels:
+            response_l.append(dfolded[label])
+        
+        self.response_l = response_l
+        return response_l
+    
+    def compute_binned_responses(self):
+        """Bins the stored responses in the same way as the stimuli"""
+        assert len(self.t_l) == len(self.response_l)
+        
+        # Iterate over stimuli
+        for folded, t_stim in zip(self.response_l, self.t_l):
+            # Bin each, using the same number of bins as in t
+            binned = kkpandas.Binned.from_folded(folded, bins=len(t_stim))
+            
+            # Check that the starts and stops line up
+            1/0
 
     def compute_full_stimulus_matrix(self, n_delays=3, timefreq_list=None,
         blanking_value=-np.inf):
