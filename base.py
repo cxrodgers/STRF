@@ -209,7 +209,14 @@ class Experiment:
 
     def compute_full_stimulus_matrix(self, n_delays=3, timefreq_list=None,
         blanking_value=-np.inf):
-        """Given a list of spectrograms, returns the full stimulus matrix."""
+        """Given a list of spectrograms, returns the full stimulus matrix.
+        
+        See concatenate_and_reshape_timefreq for the implementation details.
+        
+        This function actually returns a transposed version, more suitable
+        for fitting. The shape is (N_timepoints, N_freqs * N_delays),
+        ie, (N_constraints, N_inputs)
+        """
         # Determine what list to operate on
         if timefreq_list is None:
             timefreq_list = self.timefreq_list
@@ -221,15 +228,20 @@ class Experiment:
         # Concatenate and reshape
         self.full_stimulus_matrix = concatenate_and_reshape_timefreq(
             timefreq_list, 
-            n_delays=n_delays, blanking_value=blanking_value)
+            n_delays=n_delays, blanking_value=blanking_value).T
 
         # Write out
 
         return self.full_stimulus_matrix
     
     def compute_full_response_matrix(self):
-        """Returns a response matrix, suitable for fitting."""
-        return self.compute_concatenated_responses()
+        """Returns a response matrix, suitable for fitting.
+        
+        Returned array has shape (N_timepoints, 1)
+        """
+        self.full_response_matrix = \
+            self.compute_concatenated_responses()[:, None]
+        return self.full_response_matrix
     
 
 
