@@ -84,6 +84,7 @@ class STRFlabFileSchema:
         self.directory = os.path.abspath(directory)
         self.name = os.path.split(self.directory)[1]
         self.timefreq_path = None
+        self.spike_path = self.directory
         
         self.populate()
     
