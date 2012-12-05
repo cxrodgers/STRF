@@ -25,6 +25,21 @@ import os, re
 import numpy as np
 import kkpandas # could consider making this optional
 
+def load_waveform_from_matfile(filename, fs=None):
+    """Load 'waveform' from matlab file. If possible, loads sampling rate.
+    
+    If fs is None, look for a variable called 'fs' in the matfile.
+    If 'fs' is not in the matfile, returns whatever you pass as fs.
+    """
+    import scipy.io
+    res = scipy.io.loadmat(filename)
+    waveform = res['waveform'].flatten()
+    
+    if 'fs' in res and fs is None:
+        fs = res['fs']
+    
+    return waveform, fs
+
 class STRFlabFileSchema:
     """Object encapsulating format spec for STRFlab-type files"""
     stim_file_prefix = 'stim'
