@@ -72,7 +72,7 @@ def concatenate_and_reshape_timefreq(timefreq_list, n_delays,
 
 class Experiment:
     """Object encapsulating STRF estimation for a specific dataset"""
-    def __init__(self, path=None, file_schema=None):
+    def __init__(self, path=None, file_schema=None, timefreq_path=None, **file_schema_kwargs):
         """Create a new object to estimate a STRF from a dataset.
         
         There are many computation steps which must be done in order.
@@ -98,7 +98,11 @@ class Experiment:
         # Location of data
         self.path = path
         if file_schema is None:
-            self.file_schema = STRFlabFileSchema(self.path)
+            self.file_schema = STRFlabFileSchema(self.path, **file_schema_kwargs)
+            
+            # Hack to make it load the timefreq files
+            self.file_schema.timefreq_path = timefreq_path
+            self.file_schema.populate()
         
         # How to read timefreq files
         self.timefreq_file_reader = io.read_timefreq_from_matfile
@@ -317,6 +321,19 @@ def clean_up_stimulus(whole_stimulus, silence_value='min_row', z_score=True):
     
     return cleaned_stimulus_a
 
+
+class RidgeFitter:
+    """Like DirectFitter but operates on Experiment objects
+    
+    Gets the full matrices from it, cleans them if necessary
+    Stores results
+    """
+    def __init__(self, expt=None):
+        self.expt = expt
+    
+    def fit(self):
+        #X = self.expt
+        pass
 
 class DirectFitter:
     """Calculates STRF for response matrix and stimulus matrix"""
