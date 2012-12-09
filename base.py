@@ -1,7 +1,103 @@
 import numpy as np
 import io
 from io import STRFlabFileSchema
-import kkpandas
+import kkpandas, pandas
+
+
+
+# Define the algorithms
+def fit_lstsq(A, b):
+    return np.linalg.lstsq(A, b)[0]
+
+def fit_ridge(A, b, alpha=None, ATA=None):
+    # Calculate ATA if necessary
+    if ATA is None:
+        ATA = np.dot(A.T, A)
+    
+    if alpha is None:
+        # No ridge, just pinv
+        to_invert = ATA
+    else:
+        # Ridge at alpha
+        to_invert = ATA + alpha * (len(ATA) ** 2) * np.eye(len(ATA))
+    return reduce(np.dot, (np.linalg.inv(to_invert), A.T, b))
+
+def fit_STA(A, b):
+    return np.dot(A.T, b) / b.sum()
+
+def check_fit(A, b, X_fit=None, b_pred=None, scale_to_fit=False):
+    if b_pred is None:
+        b_pred = np.dot(A, X_fit)
+    if scale_to_fit:
+        b_pred = b_pred * np.sqrt(b.var() / b_pred.var())
+    err = b - b_pred
+    
+    # Calculate xcorr
+    bx = ((b - b.mean()) / b.std()).flatten()
+    b_predx = ((b_pred - b_pred.mean()) / b_pred.std()).flatten()
+    xcorr = np.inner(bx, b_predx) / float(len(bx))
+    return err.var(), err.mean(), b_pred.var(), err.var() / b.var(), xcorr
+
+def jackknife_over_alpha(A, b, alphas, n_jacks=5, meth=fit_ridge,
+    keep_fits=False, warn=True):
+    # warn
+    if warn:
+        if not np.allclose(0, A.mean(axis=0)):
+            print "warning: A is not zero meaned"
+        if not np.allclose(0, b.mean(axis=0)):
+            print "warning: b is not zero meaned"
+    
+    # Set up the analyses
+    analyses = [
+        ['ridge%010.05f' % alpha, meth, {'alpha': alpha}]
+        for alpha in alphas]
+    
+    # set up the jackknife
+    jk_len = len(A) / n_jacks
+    jk_starts = np.arange(0, len(A) - jk_len + 1, jk_len)
+
+    # set up jk_results
+    jk_metrics = []
+    jk_fits = []
+    
+    # Jack the knifes
+    for n, jk_start in enumerate(jk_starts):
+        # Set up test and train sets
+        jk_idxs = np.arange(jk_start, jk_start + jk_len)
+        jk_mask = np.zeros(len(A), dtype=np.bool)
+        jk_mask[jk_idxs] = 1
+        A_test, A_train = A[jk_mask], A[~jk_mask]
+        b_test, b_train = b[jk_mask], b[~jk_mask]
+
+        # Run the analyses
+        results = []
+        for name, meth, kwargs in analyses:
+            X_fit = meth(A_train, b_train, **kwargs)
+            evar, ebias, predvar, eratio, xcorr = check_fit(
+                A_train, b_train, X_fit)
+            evarsc, ebiassc, predvarsc, eratiosc, xcorrsc = check_fit(
+                A_test, b_test, X_fit)
+            results.append((name, X_fit, evar, ebias, predvar, eratio, xcorr,
+                evarsc, ebiassc, predvarsc, eratiosc, xcorrsc))
+
+        # DataFrame it
+        metrics = pandas.DataFrame(results, 
+            columns=['name', 'fit', 'evar', 'ebias', 'predvar', 'eratio', 'xcorr',
+                'evarsc', 'ebiassc', 'predvarsc', 'eratiosc', 'xcorrsc'])
+        metrics = metrics.set_index('name')
+        fits = metrics.pop('fit')
+
+        #~ # Make predictions
+        #~ preds = pandas.Series([np.dot(A_test, fit) for fit in fits], 
+            #~ index=fits.index)
+        
+        # Store
+        jk_metrics.append(metrics)
+        if keep_fits:
+            jk_fits.append(fits)
+        #~ jk_preds.append(preds)
+    
+    return jk_metrics, jk_fits
 
 def allclose_2d(a):
     """Returns True if entries in `a` are close to equal.
