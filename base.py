@@ -9,7 +9,48 @@ import kkpandas, pandas
 def fit_lstsq(A, b):
     return np.linalg.lstsq(A, b)[0]
 
-def fit_ridge(A, b, alpha=None, ATA=None):
+def fit_ridge_by_SVD(A, b, alpha=None, precomputed_SVD=None, check_SVD=False,
+    normalize_alpha=True, keep_dimensions_up_to=None):
+    if precomputed_SVD is None:
+        # Find SVD such that u * np.diag(s) * vh = A
+        print "doing SVD"
+        u, s, vh = np.linalg.svd(A, full_matrices=False)
+    else:
+        u, s, vh = precomputed_SVD
+        if check_SVD:
+            check = reduce(np.dot, [u, np.diag(s), vh])
+            if not np.allclose(check, A):
+                raise ValueError("A does not agree with SVD")
+
+    if normalize_alpha:
+        alpha = np.sqrt(alpha) * len(vh)
+
+    # Project the output onto U
+    ub = np.dot(u.T, b)
+    
+    if keep_dimensions_up_to is not None:
+        if (keep_dimensions_up_to < 0) or (keep_dimensions_up_to > 1):
+            raise ValueError("keep_dimensions_up_to must be between 0 and 1")
+        s = s.copy()
+        sidx = np.where(
+            (np.cumsum(s**2) / (s**2).sum()) >= keep_dimensions_up_to)[0][0]
+        if sidx + 1 < len(s):
+            s[sidx + 1:] = 0
+
+    # solve for w = ub * diag(1/s)
+    # Note that this explodes dimensions with low variance (small s)
+    # so we can replace diag(1/s) with diag(s/(s**2 + alpha**2))
+    d = s / (s**2 + alpha**2)
+    # Account for 0/0
+    if keep_dimensions_up_to is not None:
+        d[sidx + 1:] = 0
+    w = ub * d[:, None]
+
+    # Rotate w back to get x
+    x_svdfit = np.dot(vh.T, w)
+    return x_svdfit
+
+def fit_ridge(A, b, alpha=None, ATA=None, normalize_alpha=True):
     # Calculate ATA if necessary
     if ATA is None:
         ATA = np.dot(A.T, A)
@@ -18,8 +59,10 @@ def fit_ridge(A, b, alpha=None, ATA=None):
         # No ridge, just pinv
         to_invert = ATA
     else:
+        if normalize_alpha:
+            alpha = alpha * (len(ATA) ** 2)
         # Ridge at alpha
-        to_invert = ATA + alpha * (len(ATA) ** 2) * np.eye(len(ATA))
+        to_invert = ATA + alpha * np.eye(len(ATA))
     return reduce(np.dot, (np.linalg.inv(to_invert), A.T, b))
 
 def fit_STA(A, b):
@@ -37,6 +80,98 @@ def check_fit(A, b, X_fit=None, b_pred=None, scale_to_fit=False):
     b_predx = ((b_pred - b_pred.mean()) / b_pred.std()).flatten()
     xcorr = np.inner(bx, b_predx) / float(len(bx))
     return err.var(), err.mean(), b_pred.var(), err.var() / b.var(), xcorr
+
+def jackknife_with_params(A, b, params, n_jacks=5, keep_fits=False, warn=True,
+    kwargs_by_jack=None, **kwargs):
+    """Solve Ax=b with jack-knifing over specified method.
+    
+    The data will be split into training and testing sets, in `n_jacks`
+    different ways. For each set, each analysis in `params` will be run.
+    Fit metrics are calculated and returned for each run.
+
+    Parameters
+    ----------
+    A : M, N
+    b : N, 1
+    params : DataFrame specifying analyses to run
+        Has the following columns:
+        name : name of the analysis
+        meth : handle to function to call for analysis
+        kwargs : dict of keyword arguments to pass on that analysis
+    keep_fits : if False, do not return anything for fits
+    warn : if True, check that A and b are zero-meaned
+    kwargs_by_jack : list of length n_jacks
+        **kwargs_by_jack[n_jack] is passed to `meth` on that jack.
+    
+    Any remaining keyword arguments are passed on every call to `meth`.
+    
+    Returns: jk_metrics, jk_fits
+        jk_metrics : DataFrame, length n_jacks * len(params)
+            Has the following columns:
+            name : name of the analysis, from params.name
+            n_jack : jack-knife number, ranges from 0 to n_jacks
+            evar : variance of the error
+            ebias : bias of the error
+            predvar : variance of the prediction
+            eratio : variance of error / variance of true result
+            xcorr : cross correlation between prediction and result
+            evar_cv, ebias_cv, predvar_cv, eratio_cv, xcorr_cv :
+                Same as above but on the testing set.
+        jk_fits : list of length n_jacks * len(params)
+            The calculated fit ('x') for each analysis
+    """
+    # warn
+    if warn:
+        if not np.allclose(0, A.mean(axis=0)):
+            print "warning: A is not zero meaned"
+        if not np.allclose(0, b.mean(axis=0)):
+            print "warning: b is not zero meaned"    
+
+    # set up the jackknife
+    jk_len = len(A) / n_jacks
+    jk_starts = np.arange(0, len(A) - jk_len + 1, jk_len)
+
+    # where to put results
+    results = []
+    
+    # Jack the knifes
+    for n_jack, jk_start in enumerate(jk_starts):
+        # Set up test and train sets
+        jk_idxs = np.arange(jk_start, jk_start + jk_len)
+        jk_mask = np.zeros(len(A), dtype=np.bool)
+        jk_mask[jk_idxs] = 1
+        A_test, A_train = A[jk_mask], A[~jk_mask]
+        b_test, b_train = b[jk_mask], b[~jk_mask]    
+        
+        # Iterate over analyses to do
+        for na, (name, meth, run_kwargs) in params.iterrows():
+            # Add the universal kwargs to the run kwargs
+            dkwargs = run_kwargs.copy()
+            if kwargs_by_jack is not None:
+                dkwargs.update(kwargs_by_jack[n_jack])
+            dkwargs.update(kwargs)
+            
+            # Call the fit
+            X_fit = meth(A_train, b_train, **dkwargs)
+            
+            # Get the metrics
+            train_metrics = check_fit(A_train, b_train, X_fit)
+            test_metrics = check_fit(A_test, b_test, X_fit)
+            
+            # Append the results
+            results.append([name, n_jack, X_fit] + 
+                list(train_metrics) + list(test_metrics))
+
+    # Form data frames to return
+    metrics = pandas.DataFrame(results, 
+        columns=['name', 'n_jack', 'fit', 
+            'evar', 'ebias', 'predvar', 'eratio', 'xcorr',
+            'evar_cv', 'ebias_cv', 'predvar_cv', 'eratio_cv', 'xcorr_cv'])
+    metrics = metrics.sort(['name', 'n_jack'])
+    fits = metrics.pop('fit')    
+    
+    return metrics, fits
+    
 
 def jackknife_over_alpha(A, b, alphas, n_jacks=5, meth=fit_ridge,
     keep_fits=False, warn=True):
