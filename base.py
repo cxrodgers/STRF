@@ -4,6 +4,114 @@ from io import STRFlabFileSchema
 import kkpandas, pandas
 
 
+def metric(b_real, b_pred):
+    return np.sum((b_real - b_pred) ** 2, axis=0)
+
+
+def iterboost_fast(A_train, b_train, A_test=None, b_test=None, niters=100, 
+    step_size=None, return_metrics=False):
+    # Set step size
+    if step_size is None:
+        step_size = .01 * np.sqrt(b_train.var() / A_train.var()) # about 1e-4
+    
+    if A_test is None:
+        do_test = False
+    else:
+        do_test = True
+    
+    # Start with a zero STRF
+    h_current = np.zeros((A_train.shape[1], 1))
+    
+    # Precalculate the update matrices
+    update_matrix = np.concatenate([
+        step_size * np.eye(len(h_current)), 
+        -step_size * np.eye(len(h_current))], axis=1)
+    bpred_update = np.dot(A_train, update_matrix)
+    
+    if do_test:
+        bpred_update_test = np.dot(A_test, update_matrix)
+    
+    # Initialize the error signals
+    # Each column is the error between the current filter + all possible updates,
+    # and the true b.
+    # Since the current filter is zero, the first error is just bpred_update - b
+    errs = bpred_update - b_train
+    if do_test:
+        errs_test = bpred_update_test - b_test
+
+    # Iterate
+    best_update_l, metric_train_l, metric_test_l, h_all = [], [], [], []
+    for niter in range(niters):
+        # Find best possible update and store its rss
+        rss = np.sum(errs**2, axis=0)
+        best_update = np.argmin(rss)
+        metric_train_l.append(rss[best_update])
+        #myutils.printnow(best_update)
+        
+        # Update the errors
+        errs += bpred_update[:, best_update][:, None]
+        
+        # Store performance on test set
+        if do_test:
+            metric_test_l.append(np.sum(errs_test[:, best_update]**2))
+        
+        # Update errors on test set
+        if do_test:
+            errs_test += bpred_update_test[:, best_update][:, None]
+        
+        # Update h
+        best_update_l.append(best_update)
+        h_current += update_matrix[:, best_update][:, None]
+        h_all.append(h_current.copy())        
+        
+        #~ # Stopping condition
+        #~ if (
+            #~ (best_update + len(h_current) in best_update_l) or 
+            #~ (best_update - len(h_current) in best_update_l)):
+            #~ break    
+    
+    if return_metrics:
+        return h_all, metric_test_l, metric_train_l
+    else:
+        return h_all
+
+
+
+def iterboost_slow(A_train, b_train, A_test, b_test, niters=100, step_size=None):
+    """Simple version of boost. Needs to be fixed, should be easier to debug"""
+    best_update_l, metric_train_l, metric_test_l, h_all = [], [], [], []
+    for niter in range(50):
+        # Current predictions on training_set
+        b_train_predictions = np.dot(A_train, h_current + update_matrix)
+        metric_current_predictions = metric(b_train, b_train_predictions)
+        
+        # Choose the best
+        best_update = np.argmin(metric_current_predictions)
+        myutils.printnow(best_update)
+        
+        best_update_l.append(best_update)
+        h_updated = h_current + update_matrix[:, best_update][:, None]
+        b_train_predictions = b_train_predictions[:, best_update][:, None]
+        
+        # Find error on training set
+        metric_train = metric_current_predictions[best_update]
+        metric_train_l.append(metric_train)
+        
+        # Find error on test set
+        metric_test = metric(b_test, np.dot(A_test, h_updated))[0]
+        metric_test_l.append(metric_test)
+        
+        # Update h
+        h_current = h_updated
+        h_all.append(h_updated)
+        
+        # Stopping condition
+        #~ if (
+            #~ (best_update + len(h_current) in best_update_l) or 
+            #~ (best_update - len(h_current) in best_update_l)):
+            #~ break        
+
+
 
 # Define the algorithms
 def fit_lstsq(A, b):
@@ -82,7 +190,7 @@ def check_fit(A, b, X_fit=None, b_pred=None, scale_to_fit=False):
     return err.var(), err.mean(), b_pred.var(), err.var() / b.var(), xcorr
 
 def jackknife_with_params(A, b, params, n_jacks=5, keep_fits=False, warn=True,
-    kwargs_by_jack=None, **kwargs):
+    kwargs_by_jack=None, meth_returns_list=False, **kwargs):
     """Solve Ax=b with jack-knifing over specified method.
     
     The data will be split into training and testing sets, in `n_jacks`
@@ -100,6 +208,14 @@ def jackknife_with_params(A, b, params, n_jacks=5, keep_fits=False, warn=True,
         kwargs : dict of keyword arguments to pass on that analysis
     keep_fits : if False, do not return anything for fits
     warn : if True, check that A and b are zero-meaned
+    meth_returns_list : If None, assumes that `meth` returns a
+        single fit.
+        Otherwise, this argument should be a list of strings, and `meth`
+        should return a list of fits that is the same length.
+        Each string in meth_returns_list will be appended to `name` and
+        attached to the corresponding fit.
+        Example: meth_returns_list=('step1', 'step2', 'step3')
+            for an iterative method returning all of its fits.
     kwargs_by_jack : list of length n_jacks
         **kwargs_by_jack[n_jack] is passed to `meth` on that jack.
     
@@ -152,15 +268,28 @@ def jackknife_with_params(A, b, params, n_jacks=5, keep_fits=False, warn=True,
             dkwargs.update(kwargs)
             
             # Call the fit
-            X_fit = meth(A_train, b_train, **dkwargs)
-            
-            # Get the metrics
-            train_metrics = check_fit(A_train, b_train, X_fit)
-            test_metrics = check_fit(A_test, b_test, X_fit)
-            
-            # Append the results
-            results.append([name, n_jack, X_fit] + 
-                list(train_metrics) + list(test_metrics))
+            if meth_returns_list is not None:
+                X_fit_l = meth(A_train, b_train, **dkwargs)
+                assert len(meth_returns_list) == len(X_fit_l)
+                for xxfit, xxfitname in zip(X_fit_l, meth_returns_list):
+                    # Get the metrics
+                    train_metrics = check_fit(A_train, b_train, xxfit)
+                    test_metrics = check_fit(A_test, b_test, xxfit)
+                    
+                    # Append the results
+                    results.append([name+str(xxfitname), n_jack, xxfit] + 
+                        list(train_metrics) + list(test_metrics))
+
+            else:
+                X_fit = meth(A_train, b_train, **dkwargs)
+                
+                # Get the metrics
+                train_metrics = check_fit(A_train, b_train, X_fit)
+                test_metrics = check_fit(A_test, b_test, X_fit)
+                
+                # Append the results
+                results.append([name, n_jack, X_fit] + 
+                    list(train_metrics) + list(test_metrics))
 
     # Form data frames to return
     metrics = pandas.DataFrame(results, 
