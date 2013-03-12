@@ -10,10 +10,23 @@ def metric(b_real, b_pred):
 
 def iterboost_fast(A_train, b_train, A_test=None, b_test=None, niters=100, 
     step_size=None, return_metrics=False):
+    """Iteratively find regularized solution to Ax = b using boosting.
+    
+    Currently there is no stopping condition implemented. You will have to
+    determine the best stopping iteration offline.
+    
+    A_train, b_train : training set
+    A_test, b_test : test set
+    niters : number of iterations to do
+    step_size : amount to update the coefficient by at each iteration
+    return_metrics : if True, return the calculated predictions on the
+        training and testing set at each iteration
+    """
     # Set step size
     if step_size is None:
         step_size = .01 * np.sqrt(b_train.var() / A_train.var()) # about 1e-4
     
+    # If a test matrix was provided, check the fit quality at each iteration
     if A_test is None:
         do_test = False
     else:
@@ -22,12 +35,31 @@ def iterboost_fast(A_train, b_train, A_test=None, b_test=None, niters=100,
     # Start with a zero STRF
     h_current = np.zeros((A_train.shape[1], 1))
     
+    # We need to precalculate as much as possible to save computation time
+    # at each iteration. We will precalculate the new predictions, in terms
+    # of the previous predictions and the update matrix. We take advantage
+    # of the fact that the effect of each update on the current predictions
+    # (and errors) is simply additive.
+    # 
+    # It would be more stable (but much slower) to re-calculate these every
+    # time!
+    #
     # Precalculate the update matrices
+    # Each column is the same shape as h_current
+    # There are two times as many columns as rows
+    # Each one is a plus or minus update of one coefficient
+    # So this is just two identity matrices put together, but multiplied by
+    # plus or minus step_size
     update_matrix = np.concatenate([
         step_size * np.eye(len(h_current)), 
         -step_size * np.eye(len(h_current))], axis=1)
+    
+    # Determine the amount that predicted output will change by, given each
+    # possible coefficient update
     bpred_update = np.dot(A_train, update_matrix)
     
+    # If necessary, precalculate the update on the prediction on the test set
+    # for each possible update
     if do_test:
         bpred_update_test = np.dot(A_test, update_matrix)
     
@@ -39,36 +71,36 @@ def iterboost_fast(A_train, b_train, A_test=None, b_test=None, niters=100,
     if do_test:
         errs_test = bpred_update_test - b_test
 
-    # Iterate
+    # Variable to store results in
     best_update_l, metric_train_l, metric_test_l, h_all = [], [], [], []
+
+    # Iterate
     for niter in range(niters):
-        # Find best possible update and store its rss
+        # Find the RSS for each possible update (sum of squared errors for
+        # each possible update).
+        # This is the inner loop but I do not see any way to optimize it!
         rss = np.sum(errs**2, axis=0)
+        
+        # Find the update that minimizes the RSS and store
         best_update = np.argmin(rss)
         metric_train_l.append(rss[best_update])
-        #myutils.printnow(best_update)
         
-        # Update the errors
+        # Update the errors by including the newest coefficient change
         errs += bpred_update[:, best_update][:, None]
         
         # Store performance on test set
         if do_test:
             metric_test_l.append(np.sum(errs_test[:, best_update]**2))
         
-        # Update errors on test set
+        # Update errors on test set by including the effect of the newest
+        # update.
         if do_test:
             errs_test += bpred_update_test[:, best_update][:, None]
         
-        # Update h
+        # Update h with the new best update
         best_update_l.append(best_update)
         h_current += update_matrix[:, best_update][:, None]
         h_all.append(h_current.copy())        
-        
-        #~ # Stopping condition
-        #~ if (
-            #~ (best_update + len(h_current) in best_update_l) or 
-            #~ (best_update - len(h_current) in best_update_l)):
-            #~ break    
     
     if return_metrics:
         return h_all, metric_test_l, metric_train_l
@@ -119,42 +151,65 @@ def fit_lstsq(A, b):
 
 def fit_ridge_by_SVD(A, b, alpha=None, precomputed_SVD=None, check_SVD=False,
     normalize_alpha=True, keep_dimensions_up_to=None):
+    """Calculate the regularized solution to Ax = b.
+    
+    A, b : input and output matrices
+    alpha : ridge parameter to apply to the singular values
+    precomputed_SVD : tuple of u, s, vh for A
+    normalize_alpha : if True, normalize alpha to be roughly equivalent to
+        the size of the singular values
+    keep_dimensions_up_to : set all singular values to zero beyond the Nth,
+        where the first N singular values account for this much of the variance
+    """
+    # Calculate the SVD of A
     if precomputed_SVD is None:
         # Find SVD such that u * np.diag(s) * vh = A
         print "doing SVD"
         u, s, vh = np.linalg.svd(A, full_matrices=False)
     else:
+        # If the SVD was provided, optionally check that it is correct
         u, s, vh = precomputed_SVD
         if check_SVD:
+            # This implements u * diag(s) * vh in matrix multiplication
             check = reduce(np.dot, [u, np.diag(s), vh])
             if not np.allclose(check, A):
                 raise ValueError("A does not agree with SVD")
 
+    # optionally normalize alpha
     if normalize_alpha:
         alpha = np.sqrt(alpha) * len(vh)
 
-    # Project the output onto U
+    # Project the output onto U. ub = u.T * b
     ub = np.dot(u.T, b)
     
+    # Optionally set some singular values to zero
     if keep_dimensions_up_to is not None:
         if (keep_dimensions_up_to < 0) or (keep_dimensions_up_to > 1):
             raise ValueError("keep_dimensions_up_to must be between 0 and 1")
         s = s.copy()
+        
+        # Find the index for the first singular value beyond the amount required
         sidx = np.where(
             (np.cumsum(s**2) / (s**2).sum()) >= keep_dimensions_up_to)[0][0]
+        
+        # Set the values beyond this to zero
         if sidx + 1 < len(s):
             s[sidx + 1:] = 0
 
-    # solve for w = ub * diag(1/s)
+    # (pseudo-)invert s to get d
     # Note that this explodes dimensions with low variance (small s)
     # so we can replace diag(1/s) with diag(s/(s**2 + alpha**2))
+    # d and s are one-dimensional, so this is element-wise
     d = s / (s**2 + alpha**2)
+    
     # Account for 0/0
     if keep_dimensions_up_to is not None:
         d[sidx + 1:] = 0
+    
+    # solve for w = ub * diag(1/s)
     w = ub * d[:, None]
 
-    # Rotate w back to get x
+    # Project w onto vh to find the solution
     x_svdfit = np.dot(vh.T, w)
     return x_svdfit
 
