@@ -371,6 +371,15 @@ def allclose_2d(a):
     If the entries are arrays of different size, returns False.
     If len(a) == 1, returns True.
     """
+    # Return true if only one
+    if len(a) == 1:
+        return True
+
+    # Return false if different lengths
+    if len(np.unique(map(len, a))) > 1:
+        return False
+
+    # Otherwise use allclose
     a = np.asarray(a)
     if a.ndim == 0:
         raise ValueError("input to allclose_2d cannot be 0d")
